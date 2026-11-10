@@ -289,20 +289,44 @@ def login_with_redirects() -> httpx.Client:
 
     # 1.2 第一轮 GeeTest 交互，浏览器登录流在这里就拿到 validate
     print("  执行登录验证码握手 ...")
-    crack = GeeTestCrack(gt, challenge, MOUSE_PATH_FILE, referer="https://openid.13a.com/")
-    crack.get_type()
-    crack.get_c_s()
-    ajax_result = crack.ajax()
-
-    validate = ajax_result.get("validate")
-    print(f"  ajax 返回: {json.dumps(ajax_result, ensure_ascii=False)[:200]}...")
-    if ajax_result.get("result") == "click":
-        validate = _solve_click_captcha(crack)
-    elif not validate:
+    validate = None
+    crack = None
+    for round_no in range(1, 7):
+        if round_no > 1:
+            # 上一轮返回 click（需要识图）：换一张 challenge 重试
+            print(f"  [重试 {round_no}/6] 换取新的验证码 challenge ...")
+            resp = client.get(
+                "https://openid.13a.com/cgi/captcha?login",
+                headers={"referer": "https://openid.13a.com/login", **OPENID_AJAX_HEADERS},
+            )
+            challenge = resp.json()["message"]["challenge"]
+        crack = GeeTestCrack(gt, challenge, MOUSE_PATH_FILE, referer="https://openid.13a.com/")
+        crack.get_type()
+        crack.get_c_s()
+        ajax_result = crack.ajax()
+        print(f"  ajax 返回: {json.dumps(ajax_result, ensure_ascii=False)[:200]}...")
+        validate = ajax_result.get("validate")
+        if ajax_result.get("result") == "success" and validate:
+            print("  ✓ 验证码通过（协议握手直接通过，无需识图）")
+            break
+        if ajax_result.get("result") == "click":
+            if CAPTCHA_API_KEY:
+                print("  命中点选验证码，交由视觉模型识别 ...")
+                validate = _solve_click_captcha(crack)
+                if validate:
+                    break
+            else:
+                print("  命中点选验证码（需要识图），未配置视觉模型，换一张重试 ...")
+                crack.close()
+                crack = None
+                continue
         crack.close()
-        raise RuntimeError(f"登录验证码未返回 validate: {ajax_result}")
-    else:
-        print("  ✓ 验证码通过")
+        crack = None
+        if not validate:
+            time.sleep(1)
+
+    if not validate or not crack:
+        raise RuntimeError("登录验证码握手多轮重试仍未拿到 validate")
 
     # 1.3 POST 登录
     print("  提交登录 ...")
@@ -367,66 +391,61 @@ def sign_in(client: httpx.Client) -> bool:
         print(f"  今天已经签到过了! 连续签到 {sign_info.get('days', '?')} 天")
         return True
 
-    # 2.2 获取签到的 GeeTest 配置
+    # 2.2 获取签到 GeeTest 配置并握手（握手通过则无需识图；遇到点选则换一张重试）
     print("  获取签到验证码配置 ...")
-    resp = client.get("https://www.natfrp.com/cgi/v4/user/sign?gt")
-    try:
-        geetest_data = resp.json()
-    except Exception:
-        # 可能返回 JSONP 或其他格式
-        print(f"  签到 GeeTest 响应: {resp.text[:200]}...")
-        # 尝试从响应中提取 JSON
-        import re
-        match = re.search(r'\((.+)\)', resp.text, re.DOTALL)
-        if match:
-            geetest_data = json.loads(match.group(1))
-        else:
-            raise RuntimeError(f"无法解析签到 GeeTest 数据: {resp.text[:200]}")
-
-    if "gt" not in geetest_data:
-        raise RuntimeError(f"签到 GeeTest 数据格式异常: {geetest_data}")
-
-    gt = geetest_data["gt"]
-    challenge = geetest_data["challenge"]
-    print(f"  GT: {gt[:16]}...  Challenge: {challenge[:16]}...")
-
-    # 2.3 破解 GeeTest
-    print("  破解签到验证码 ...")
-    crack = GeeTestCrack(gt, challenge, MOUSE_PATH_FILE, referer="https://openid.13a.com/")
-    crack.get_type()
-    crack.get_c_s()
-    crack.ajax()
-
-    # 2.4 获取验证码图片并识别 (带重试)
     validate = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        print(f"\n  --- 验证码尝试 {attempt}/{MAX_RETRIES} ---")
+    challenge = None
+    crack = None
+    for round_no in range(1, 7):
+        resp = client.get("https://www.natfrp.com/cgi/v4/user/sign?gt")
+        try:
+            geetest_data = resp.json()
+        except Exception:
+            # 可能返回 JSONP 或其他格式
+            print(f"  签到 GeeTest 响应: {resp.text[:200]}...")
+            import re
+            match = re.search(r"\((.+)\)", resp.text, re.DOTALL)
+            if match:
+                geetest_data = json.loads(match.group(1))
+            else:
+                raise RuntimeError(f"无法解析签到 GeeTest 数据: {resp.text[:200]}")
 
-        pic_type, pic_url = crack.get_pic(0 if attempt == 1 else attempt)
-        print(f"  验证码类型: {pic_type}")
+        if "gt" not in geetest_data:
+            raise RuntimeError(f"签到 GeeTest 数据格式异常: {geetest_data}")
 
-        points = _recognize_captcha(pic_url, pic_type)
-        if not points:
-            print("  ✗ 识别失败，重试 ...")
-            time.sleep(2)
-            continue
-        print(f"  识别结果: {points}")
+        gt = geetest_data["gt"]
+        challenge = geetest_data["challenge"]
+        print(f"  [第 {round_no}/6 轮] GT: {gt[:16]}...  Challenge: {challenge[:16]}...")
 
-        result = crack.verify(points)
-        print(f"  验证结果: {result}")
+        crack = GeeTestCrack(gt, challenge, MOUSE_PATH_FILE, referer="https://openid.13a.com/")
+        crack.get_type()
+        crack.get_c_s()
+        ajax_result = crack.ajax()
+        print(f"  ajax 返回: {json.dumps(ajax_result, ensure_ascii=False)[:200]}...")
 
-        if result.get("status") == "success" and result.get("data", {}).get("result") == "success":
-            validate = result["data"]["validate"]
-            print(f"  ✓ 验证码通过!")
+        if ajax_result.get("result") == "success" and ajax_result.get("validate"):
+            validate = ajax_result["validate"]
+            print("  ✓ 签到验证通过（协议握手直接通过，无需识图）")
             break
-        else:
-            print(f"  ✗ 验证失败，重试 ...")
-            time.sleep(2)
 
-    crack.close()
+        if ajax_result.get("result") == "click":
+            if CAPTCHA_API_KEY:
+                print("  命中点选验证码，交由视觉模型识别 ...")
+                validate = _solve_click_captcha(crack)
+                if validate:
+                    break
+            else:
+                print("  命中点选验证码（需要识图），未配置视觉模型，换一张重试 ...")
+
+        crack.close()
+        crack = None
+        time.sleep(1)
+
+    if crack:
+        crack.close()
 
     if not validate:
-        raise RuntimeError(f"验证码重试 {MAX_RETRIES} 次均失败")
+        raise RuntimeError("签到验证码多轮重试仍未拿到 validate")
 
     # 2.5 POST 签到
     print("  提交签到 ...")
@@ -576,9 +595,8 @@ def main():
         print("⏭  未配置 NATFRP_USERNAME / NATFRP_PASSWORD，跳过 natfrp 签到")
         return 0
     if not CAPTCHA_API_KEY:
-        print("⏭  未配置视觉模型密钥 VISION_API_KEY，跳过 natfrp 签到")
-        print("   natfrp 登录与签到均强制 GeeTest 极验，需要 OpenAI 兼容的视觉模型才能自动识别。")
-        return 0
+        print("ℹ  未配置视觉模型密钥 VISION_API_KEY，使用「协议握手 + 换图重试」模式运行")
+        print("   （极验握手多数情况可直接通过；若连续命中点选验证码，本轮会失败并留待下一时隙重试）")
 
     start_time = time.time()
 
