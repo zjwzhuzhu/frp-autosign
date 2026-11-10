@@ -1,0 +1,57 @@
+name: FRP Auto Sign-in
+
+on:
+  schedule:
+    # 北京时间 09:07 / 13:31 / 20:53（非整点，降低 GitHub 调度拥堵丢单）
+    - cron: '7 1 * * *'
+    - cron: '31 5 * * *'
+    - cron: '53 12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frp-autosign
+  cancel-in-progress: false
+
+jobs:
+  signin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 随机抖动（拟人化，1~6 分钟）
+        run: |
+          SEC=$(( (RANDOM % 300) + 60 ))
+          echo "等待 ${SEC} 秒后开始签到..."
+          sleep "$SEC"
+
+      - name: 88frp 签到
+        env:
+          FRP88_USERNAME: ${{ secrets.FRP88_USERNAME }}
+          FRP88_PASSWORD: ${{ secrets.FRP88_PASSWORD }}
+        run: python check_88frp.py
+
+      - name: natfrp 签到（需要视觉模型密钥）
+        continue-on-error: true
+        env:
+          NATFRP_USERNAME: ${{ secrets.NATFRP_USERNAME }}
+          NATFRP_PASSWORD: ${{ secrets.NATFRP_PASSWORD }}
+          VISION_API_BASE: ${{ secrets.VISION_API_BASE }}
+          VISION_API_KEY: ${{ secrets.VISION_API_KEY }}
+          VISION_MODEL: ${{ secrets.VISION_MODEL }}
+          MAX_RETRIES: '6'
+        run: python natfrp/auto_signin.py
