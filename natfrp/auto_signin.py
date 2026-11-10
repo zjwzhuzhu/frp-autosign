@@ -417,7 +417,7 @@ def sign_in(client: httpx.Client) -> bool:
         challenge = geetest_data["challenge"]
         print(f"  [第 {round_no}/6 轮] GT: {gt[:16]}...  Challenge: {challenge[:16]}...")
 
-        crack = GeeTestCrack(gt, challenge, MOUSE_PATH_FILE, referer="https://openid.13a.com/")
+        crack = GeeTestCrack(gt, challenge, MOUSE_PATH_FILE, referer="https://www.natfrp.com/user/")
         crack.get_type()
         crack.get_c_s()
         ajax_result = crack.ajax()
