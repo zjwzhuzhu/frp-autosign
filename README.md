@@ -5,33 +5,31 @@
 | 站点 | 方式 | 状态 |
 |---|---|---|
 | 88frp.com | 纯 HTTP（账号密码登录 + 签到接口） | ✅ 全自动 |
-| natfrp.com（SakuraFrp） | 纯 HTTP + GeeTest 极验协议 + AI 视觉识别 | ⚠ 需要视觉模型密钥 |
+| natfrp.com（SakuraFrp） | 纯 HTTP + GeeTest 协议握手（**无需视觉模型**），命中点选验证码时自动换图重试 | ✅ 全自动 |
 
 ## 一、配置 Secrets
 
 在仓库 Settings → Secrets and variables → Actions 中添加：
 
-**88frp（必需）**
 - `FRP88_USERNAME`：88frp 用户名
 - `FRP88_PASSWORD`：88frp 密码
-
-**natfrp（可选，缺任一项会自动跳过并输出提示）**
 - `NATFRP_USERNAME`：natfrp 用户名
 - `NATFRP_PASSWORD`：natfrp 密码
-- `VISION_API_BASE`：OpenAI 兼容接口地址（如 `https://api.openai.com/v1`）
-- `VISION_API_KEY`：视觉模型 API Key
-- `VISION_MODEL`：支持图片输入的模型名（如 `gpt-4o`、`doubao-1.5-vision-pro`、`claude-sonnet-4`）
 
-> natfrp 的登录与每次签到都强制 GeeTest 极验（九宫格点选/滑动），
-> 纯协议无法绕过图片内容识别，因此必须配一个可用的**多模态视觉模型**。
-> 未配置时工作流仍会正常跑 88frp，natfrp 步骤打印「跳过」并保持成功状态。
+**可选（提高点选验证码通过率，不配也能跑）**
+- `VISION_API_BASE` / `VISION_API_KEY` / `VISION_MODEL`：OpenAI 兼容视觉模型，
+  仅在极验返回「点选/九宫格」图片时才会调用；未配置时走「换一张重试」。
+
+> natfrp 的 GeeTest 走的是协议握手（AES/RSA 加密的 `w` 参数 + 鼠标轨迹 + 指纹字段），
+> 实测握手阶段服务端多数情况直接返回 `success` 并下发 validate，**无需识图即可登录与签到**。
+> 少数情况会下发点选图片，此时换新 challenge 重试（最多 6 轮）。
 
 ## 二、运行方式
 
 - 定时：每天北京时间 `09:07` / `13:31` / `20:53` 三个非整点窗口（降低 GitHub 调度丢单），
   每次触发前随机等待 1~6 分钟。
 - 手动：Actions → FRP Auto Sign-in → Run workflow。
-- 已签到时会输出「今日已签到」并正常结束。
+- 已签到时会输出「今日已签到 / 今天已经签到过了」并正常结束。
 
 ## 三、接口说明（88frp）
 
