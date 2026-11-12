@@ -554,26 +554,38 @@ def solve_geetest_capmonster(
     raise RuntimeError("CapMonster 求解超时")
 
 
-# ── 验证码识别 ────────────────────────────────────────────────
+# ── 验证码识别（多模态视觉模型）──────────────────────────────
 
 def _recognize_captcha(image_url: str, pic_type: str) -> list:
     """
-    调用多模态 AI 识别验证码图片
+    调用多模态 AI 识别验证码图片（九宫格/点选）
+    关键：必须先下载图片转 base64 再发给 AI（外部 URL 可能无法被 AI 端点加载）
     返回点击坐标列表，格式为 ["col_row", ...]
     """
     if not CAPTCHA_API_KEY:
         print("  ✗ 未配置 CAPTCHA_API_KEY")
         return []
 
-    client = OpenAI(base_url=CAPTCHA_API_BASE, api_key=CAPTCHA_API_KEY)
+    # 下载图片并转 base64 data URL
+    import base64 as _b64
+    img_resp = requests.get(image_url, timeout=30,
+                            headers={"User-Agent": COMMON_HEADERS["user-agent"],
+                                     "Referer": "https://www.natfrp.com/"})
+    img_data = _b64.b64encode(img_resp.content).decode()
+    data_url = f"data:image/jpeg;base64,{img_data}"
+
+    # 自签名证书：禁用 SSL 校验
+    import httpx as _hx
+    _http = _hx.Client(verify=False, timeout=120)
+    client = OpenAI(base_url=CAPTCHA_API_BASE, api_key=CAPTCHA_API_KEY, http_client=_http)
 
     if pic_type == "nine":
-        # 九宫格验证码
         prompt = (
-            '这是一个九宫格验证码。请按从左到右、从上到下的顺序识别每个格子里的物品名称，'
-            '最后识别左下角的参考图。输出格式为JSON：{"1":"名称", "2":"名称", ..., "10":"参考图名称"}。'
-            '名称要简洁，参考图名称必须是九宫格里已有的名称。若有类似物品（如气球与热气球），请统一名称。'
-            '只输出JSON，不要其他文字。'
+            "这是一个GeeTest九宫格验证码。图片底部左下角有一个小的参考图标（目标物品的简笔画），"
+            "上方是3x3的九宫格，每格包含不同物品的照片。\n"
+            "请仔细观察参考图标是什么物品，然后判断九宫格中哪些格子包含与参考图标相同的物品。\n"
+            "格子编号规则：从左到右、从上到下，依次为 1_1, 1_2, 1_3, 2_1, 2_2, 2_3, 3_1, 3_2, 3_3。\n"
+            '只输出JSON数组，格式如 ["1_2","2_1","2_3"]，不要其他文字。'
         )
         response = client.chat.completions.create(
             model=CAPTCHA_MODEL,
@@ -581,47 +593,29 @@ def _recognize_captcha(image_url: str, pic_type: str) -> list:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "image_url", "image_url": {"url": data_url}},
                 ],
             }],
             stream=False,
         )
         result_text = _strip_json_fence(_extract_message_content(response))
         if not result_text:
-            choices = getattr(response, "choices", None) or []
-            if choices:
-                message = getattr(choices[0], "message", None)
-                if message and getattr(message, "refusal", None):
-                    print(f"  AI 拒绝识别: {message.refusal}")
+            print("  ✗ AI 未返回内容")
             return []
-        print(f"  AI 识别原始结果: {result_text}")
+
+        print(f"  AI 识别结果: {result_text[:300]}")
 
         try:
-            recognition = json.loads(result_text)
-        except json.JSONDecodeError:
-            print("  ✗ JSON 解析失败")
-            return []
+            import re as _re
+            m = _re.search(r'\[.*?\]', result_text, _re.DOTALL)
+            if m:
+                points = json.loads(m.group())
+                print(f"  解析结果: {points}")
+                return points
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"  ✗ 解析识别结果失败: {e}")
 
-        target_name = recognition.get("10", "").strip()
-        if not target_name:
-            print("  ✗ 未能获取参考图名称")
-            return []
-
-        print(f"  目标物品: {target_name}")
-
-        # 匹配格子，返回 col_row 格式
-        points = []
-        for i in range(9):
-            position = str(i + 1)
-            item_name = recognition.get(position, "").strip()
-            if item_name == target_name:
-                # 位置 i: 行 = i // 3 + 1, 列 = i % 3 + 1
-                row = i // 3 + 1
-                col = i % 3 + 1
-                points.append(f"{col}_{row}")
-                print(f"  匹配! 位置 {position}: {item_name} → {col}_{row}")
-
-        return points
+        return []
 
     else:
         # icon/space 类型验证码 (点选文字/图标位置)
