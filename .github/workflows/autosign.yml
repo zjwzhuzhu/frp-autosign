@@ -33,6 +33,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 下载 MobileNet 分类模型
+        run: |
+          mkdir -p models
+          curl -sL -o models/mobilenet.onnx \
+            "https://github.com/onnx/models/raw/main/validated/vision/classification/mobilenet/model/mobilenetv2-12.onnx"
+          ls -la models/mobilenet.onnx
+
       - name: 随机抖动（拟人化，1~6 分钟）
         run: |
           SEC=$(( (RANDOM % 300) + 60 ))
