@@ -59,7 +59,6 @@ jobs:
         run: python check_88frp.py
 
       - name: natfrp 签到（需要视觉模型密钥）
-        continue-on-error: true
         env:
           NATFRP_USERNAME: ${{ secrets.NATFRP_USERNAME }}
           NATFRP_PASSWORD: ${{ secrets.NATFRP_PASSWORD }}
