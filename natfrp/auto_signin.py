@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import httpx
+import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -450,18 +451,31 @@ def sign_in(client: httpx.Client) -> bool:
             break
 
         if ajax_result.get("result") == "click":
-            # 需要解九宫格图片验证码 → 本地 MobileNet 识别（零 key）
-            print("  命中点选验证码，本地识别九宫格 ...")
+            # 九宫格点选：优先视觉模型，失败再退回本地 MobileNet
+            print("  命中点选验证码，识别九宫格 ...")
             pic_type, pic_url = crack.get_pic(0)
             print(f"  验证码类型: {pic_type}")
             img_bytes = client.get(pic_url).content
-            points = solve_nine_grid_local(img_bytes)
-            print(f"  识别结果: {points}")
+            points = []
+            used = ""
+            if CAPTCHA_API_KEY:
+                points = _vision_nine_grid(img_bytes)
+                used = "视觉模型"
+            if not points:
+                points = solve_nine_grid_local(img_bytes)
+                used = "MobileNet"
+            print(f"  识别结果({used}): {points}")
+            if not points:
+                print("  ✗ 本轮无有效识别结果，换一张重试")
+                crack.close()
+                crack = None
+                time.sleep(1)
+                continue
             verify_result = crack.verify(points)
             print(f"  验证结果: {json.dumps(verify_result, ensure_ascii=False)[:200]}")
             if verify_result.get("status") == "success" and verify_result.get("data", {}).get("result") == "success":
                 validate = verify_result["data"]["validate"]
-                print("  ✓ 验证码通过（本地识别）")
+                print(f"  ✓ 验证码通过（{used}）")
                 break
 
         crack.close()
@@ -556,6 +570,127 @@ def solve_geetest_capmonster(
 
 # ── 验证码识别（多模态视觉模型）──────────────────────────────
 
+NINE_PROMPT = (
+    "这是极验(GeeTest)的九宫格点选验证码。\n"
+    "图片最下方、左侧那个独立的小图案是【参考图标】，代表要找的目标物品（线条简笔画）。\n"
+    "图片上方是 3 行 × 3 列的格子，每个格子里是一张物品的真实照片。\n"
+    "任务：找出所有与参考图标属于同一种物品的格子。\n"
+    "要点：\n"
+    "1. 参考图标是简笔画，格子里的物品是真实照片，形状、角度、颜色、背景都可能不同；\n"
+    "2. 只按「物品类别」判断，例如参考图标是鹿的简笔画，那么所有鹿的照片都算匹配；\n"
+    "3. 不要选长相不同类但风格相似的格子，也不要把参考图标本身当成格子；\n"
+    "4. 匹配的格子可能有 1 到 5 个，必须全部找出。\n"
+    "行号：从上到下为 1、2、3。列号：从左到右为 1、2、3。\n"
+    "只输出JSON，不要任何解释，格式："
+    '{"object":"目标物品名称","cells":[[行,列],[行,列]]}'
+)
+
+
+def _vision_chat(data_url: str, prompt: str, max_tokens: int = 400) -> str:
+    """直接 POST 到 OpenAI 兼容端点（支持自签名证书），返回文本内容"""
+    payload = {
+        "model": CAPTCHA_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }],
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    resp = requests.post(
+        f"{CAPTCHA_API_BASE.rstrip('/')}/chat/completions",
+        json=payload,
+        headers={"Authorization": f"Bearer {CAPTCHA_API_KEY}",
+                 "Content-Type": "application/json"},
+        timeout=120,
+        verify=False,
+    )
+    if resp.status_code != 200:
+        print(f"  ✗ 视觉 API HTTP {resp.status_code}: {resp.text[:200]}")
+        return ""
+    data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = [p.get("text", "") for p in content
+                 if isinstance(p, dict) and p.get("type") == "text"]
+        return "\n".join(x for x in parts if x).strip()
+    return ""
+
+
+def _parse_nine_cells(text: str) -> list:
+    """把模型输出解析成 GeeTest 需要的 ["列_行", ...]（极验 a 参数是 列_行）"""
+    import re as _re
+
+    text = _strip_json_fence(text)
+    raw_cells = []
+    obj = None
+
+    # 优先解析 JSON 对象
+    m = _re.search(r'\{.*\}', text, _re.DOTALL)
+    if m:
+        try:
+            obj = json.loads(m.group())
+        except (json.JSONDecodeError, ValueError):
+            obj = None
+    if isinstance(obj, dict):
+        raw_cells = obj.get("cells") or obj.get("points") or []
+    elif isinstance(obj, list):
+        raw_cells = obj
+
+    # 兜底：从 [行,列] / "行_列" / "r1c2" 这类文本里抠
+    if not raw_cells:
+        pairs = _re.findall(r'\[\s*([1-3])\s*,\s*([1-3])\s*\]', text)
+        if pairs:
+            raw_cells = [[int(a), int(b)] for a, b in pairs]
+        else:
+            pairs = _re.findall(r'([1-3])[_\-,\s]+([1-3])', text)
+            if pairs:
+                raw_cells = [[int(a), int(b)] for a, b in pairs]
+
+    points = []
+    for cell in raw_cells:
+        row = col = None
+        if isinstance(cell, (list, tuple)) and len(cell) >= 2:
+            row, col = int(cell[0]), int(cell[1])
+        elif isinstance(cell, str):
+            nums = _re.findall(r'[1-3]', cell)
+            if len(nums) >= 2:
+                row, col = int(nums[0]), int(nums[1])
+        if row is None or not (1 <= row <= 3 and 1 <= col <= 3):
+            continue
+        # 极验 a 参数 = 列_行
+        point = f"{col}_{row}"
+        if point not in points:
+            points.append(point)
+
+    if obj and isinstance(obj, dict) and obj.get("object"):
+        print(f"  目标物品: {obj['object']}")
+    return points
+
+
+def _vision_nine_grid(img_bytes: bytes) -> list:
+    """用多模态模型识别九宫格，返回 ["列_行", ...]"""
+    if not CAPTCHA_API_KEY:
+        return []
+    import base64 as _b64
+    data_url = "data:image/png;base64," + _b64.b64encode(img_bytes).decode()
+    text = _vision_chat(data_url, NINE_PROMPT)
+    if not text:
+        print("  ✗ 视觉模型未返回内容")
+        return []
+    print(f"  视觉模型输出: {text[:300]}")
+    return _parse_nine_cells(text)
+
+
 def _recognize_captcha(image_url: str, pic_type: str) -> list:
     """
     调用多模态 AI 识别验证码图片（九宫格/点选）
@@ -574,48 +709,8 @@ def _recognize_captcha(image_url: str, pic_type: str) -> list:
     img_data = _b64.b64encode(img_resp.content).decode()
     data_url = f"data:image/jpeg;base64,{img_data}"
 
-    # 自签名证书：禁用 SSL 校验
-    import httpx as _hx
-    _http = _hx.Client(verify=False, timeout=120)
-    client = OpenAI(base_url=CAPTCHA_API_BASE, api_key=CAPTCHA_API_KEY, http_client=_http)
-
     if pic_type == "nine":
-        prompt = (
-            "这是一个GeeTest九宫格验证码。图片底部左下角有一个小的参考图标（目标物品的简笔画），"
-            "上方是3x3的九宫格，每格包含不同物品的照片。\n"
-            "请仔细观察参考图标是什么物品，然后判断九宫格中哪些格子包含与参考图标相同的物品。\n"
-            "格子编号规则：从左到右、从上到下，依次为 1_1, 1_2, 1_3, 2_1, 2_2, 2_3, 3_1, 3_2, 3_3。\n"
-            '只输出JSON数组，格式如 ["1_2","2_1","2_3"]，不要其他文字。'
-        )
-        response = client.chat.completions.create(
-            model=CAPTCHA_MODEL,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            }],
-            stream=False,
-        )
-        result_text = _strip_json_fence(_extract_message_content(response))
-        if not result_text:
-            print("  ✗ AI 未返回内容")
-            return []
-
-        print(f"  AI 识别结果: {result_text[:300]}")
-
-        try:
-            import re as _re
-            m = _re.search(r'\[.*?\]', result_text, _re.DOTALL)
-            if m:
-                points = json.loads(m.group())
-                print(f"  解析结果: {points}")
-                return points
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"  ✗ 解析识别结果失败: {e}")
-
-        return []
+        return _vision_nine_grid(img_resp.content)
 
     else:
         # icon/space 类型验证码 (点选文字/图标位置)
@@ -625,24 +720,9 @@ def _recognize_captcha(image_url: str, pic_type: str) -> list:
             '[{"x": 100, "y": 200}, ...]。坐标原点在左上角。'
             '只输出JSON，不要其他文字。'
         )
-        response = client.chat.completions.create(
-            model=CAPTCHA_MODEL,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ],
-            }],
-            stream=False,
-        )
-        result_text = _strip_json_fence(_extract_message_content(response))
+        result_text = _strip_json_fence(_vision_chat(data_url, prompt))
         if not result_text:
-            choices = getattr(response, "choices", None) or []
-            if choices:
-                message = getattr(choices[0], "message", None)
-                if message and getattr(message, "refusal", None):
-                    print(f"  AI 拒绝识别: {message.refusal}")
+            print("  ✗ AI 未返回内容")
             return []
         print(f"  AI 识别原始结果: {result_text}")
 
