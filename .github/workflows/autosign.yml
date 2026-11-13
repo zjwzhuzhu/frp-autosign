@@ -7,6 +7,11 @@ on:
     - cron: '31 5 * * *'
     - cron: '53 12 * * *'
   workflow_dispatch:
+    inputs:
+      selftest:
+        description: '只测九宫格识别（不提交签到）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -61,5 +66,19 @@ jobs:
           VISION_API_BASE: ${{ secrets.VISION_API_BASE }}
           VISION_API_KEY: ${{ secrets.VISION_API_KEY }}
           VISION_MODEL: ${{ secrets.VISION_MODEL }}
+          VISION_MODEL_FALLBACK: ${{ secrets.VISION_MODEL_FALLBACK }}
           MAX_RETRIES: '6'
         run: python natfrp/auto_signin.py
+
+      # 手动触发时勾选 selftest：只做九宫格识别验证，不消耗当天签到
+      - name: natfrp 九宫格自检（不签到）
+        if: ${{ inputs.selftest }}
+        continue-on-error: true
+        env:
+          NATFRP_USERNAME: ${{ secrets.NATFRP_USERNAME }}
+          NATFRP_PASSWORD: ${{ secrets.NATFRP_PASSWORD }}
+          VISION_API_BASE: ${{ secrets.VISION_API_BASE }}
+          VISION_API_KEY: ${{ secrets.VISION_API_KEY }}
+          VISION_MODEL: ${{ secrets.VISION_MODEL }}
+          VISION_MODEL_FALLBACK: ${{ secrets.VISION_MODEL_FALLBACK }}
+        run: python probe_click_accuracy.py 3
