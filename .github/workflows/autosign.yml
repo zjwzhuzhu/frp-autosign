@@ -33,7 +33,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 下载 MobileNet 分类模型
+      - name: 下载 MobileNet 分类模型（仅作识图兜底，失败不影响主流程）
+        continue-on-error: true
         run: |
           mkdir -p models
           curl -sL -o models/mobilenet.onnx \
