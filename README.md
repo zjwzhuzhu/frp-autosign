@@ -5,7 +5,7 @@
 | 站点 | 方式 | 状态 |
 |---|---|---|
 | 88frp.com | 纯 HTTP（账号密码登录 + 签到接口） | ✅ 全自动 |
-| natfrp.com（SakuraFrp） | 纯 HTTP + GeeTest 协议握手（**无需视觉模型**），命中点选验证码时自动换图重试 | ✅ 全自动 |
+| natfrp.com（SakuraFrp） | 纯 HTTP + GeeTest 协议握手；命中九宫格时用视觉模型识图 | ✅ 全自动 |
 
 ## 一、配置 Secrets
 
@@ -15,14 +15,22 @@
 - `FRP88_PASSWORD`：88frp 密码
 - `NATFRP_USERNAME`：natfrp 用户名
 - `NATFRP_PASSWORD`：natfrp 密码
+- `VISION_API_BASE` / `VISION_API_KEY` / `VISION_MODEL`：OpenAI 兼容的多模态模型端点
+  （签到遇到九宫格时调用；例如 `https://xxx/v1` + `sk-...` + `deepseek-v4.1-flash`）。
+  **不配置也不会中断**：会退回本地 MobileNet 兜底识图，或换一张图重试。
 
-**可选（提高点选验证码通过率，不配也能跑）**
-- `VISION_API_BASE` / `VISION_API_KEY` / `VISION_MODEL`：OpenAI 兼容视觉模型，
-  仅在极验返回「点选/九宫格」图片时才会调用；未配置时走「换一张重试」。
+> natfrp 的 GeeTest 走的是协议握手（AES/RSA 加密的 `w` 参数 + 鼠标轨迹 + 指纹字段）。
+> 握手阶段服务端有时直接返回 `success` 并下发 validate（无需识图）；
+> 多数情况会下发 **nine 九宫格**，需要识别「底部参考简笔画对应的物品」并把 3×3 中同类物品的格子全部点选。
 
-> natfrp 的 GeeTest 走的是协议握手（AES/RSA 加密的 `w` 参数 + 鼠标轨迹 + 指纹字段），
-> 实测握手阶段服务端多数情况直接返回 `success` 并下发 validate，**无需识图即可登录与签到**。
-> 少数情况会下发点选图片，此时换新 challenge 重试（最多 6 轮）。
+### 九宫格识别的两个坑（重要）
+
+1. **坐标顺序**：极验 `a` 参数是 **`列_行`**（列在前、行在后），例如左上角是 `1_1`、中上是 `2_1`、左中是 `1_2`。
+   模型按「第几行第几列」推理最自然，代码里 `_parse_nine_cells()` 负责把 `[行,列]` 换算成 `列_行`。
+   顺序写反会导致识别结果完全正确却始终 `result: fail`。
+2. **必须真的调视觉模型**：`VISION_API_KEY` 缺失时脚本会静默退回本地 MobileNet，
+   而 MobileNet（ImageNet 分类）在九宫格上基本是乱猜——CI 日志会出现「识别结果(MobileNet)」。
+   排查时先确认日志里是「识别结果(视觉模型)」。
 
 ## 二、运行方式
 
