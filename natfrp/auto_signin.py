@@ -37,10 +37,6 @@ CAPTCHA_API_BASE = (
 CAPTCHA_API_KEY = os.getenv("VISION_API_KEY") or os.getenv("CAPTCHA_API_KEY", "")
 CAPTCHA_MODEL = os.getenv("VISION_MODEL") or os.getenv("CAPTCHA_MODEL", "gpt-4o")
 
-# CapMonster 打码服务（可选）：签到遇到九宫格点选时用它求解
-CAPMONSTER_KEY = os.getenv("CAPMONSTER_KEY", "")
-CAPMONSTER_API = "https://api.capmonster.cloud"
-
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "10"))
 
 MOUSE_PATH_FILE = str(Path(__file__).parent / "mousepath.json")
@@ -316,23 +312,7 @@ def login_with_redirects() -> httpx.Client:
             print("  ✓ 验证码通过（协议握手直接通过，无需识图）")
             break
         if ajax_result.get("result") == "click":
-            if CAPMONSTER_KEY:
-                # 关键：本地 ajax 已消费该 challenge，必须换一个全新 challenge 交给打码服务
-                print("  命中点选验证码，换取全新 challenge 交给 CapMonster ...")
-                api_sub = crack.ajax_host.removeprefix("https://")
-                crack.close()
-                crack = None
-                fresh = client.get(
-                    "https://openid.13a.com/cgi/captcha?login",
-                    headers={"referer": "https://openid.13a.com/login", **OPENID_AJAX_HEADERS},
-                ).json()["message"]
-                ch2, validate = solve_geetest_capmonster(
-                    fresh["gt"], fresh["challenge"], "https://openid.13a.com/login", api_sub
-                )
-                if validate:
-                    gt, challenge = fresh["gt"], ch2
-                    break
-            elif CAPTCHA_API_KEY:
+            if CAPTCHA_API_KEY:
                 print("  命中点选验证码，交由视觉模型识别 ...")
                 validate = _solve_click_captcha(crack)
                 if validate:
@@ -462,8 +442,12 @@ def sign_in(client: httpx.Client) -> bool:
                 points = _vision_nine_grid(img_bytes)
                 used = "视觉模型"
             if not points:
-                points = solve_nine_grid_local(img_bytes)
-                used = "MobileNet"
+                try:
+                    points = solve_nine_grid_local(img_bytes)
+                    used = "MobileNet"
+                except Exception as exc:  # 模型缺失/依赖异常不应中断签到
+                    print(f"  ✗ 本地 MobileNet 不可用: {exc}")
+                    points = []
             print(f"  识别结果({used}): {points}")
             if not points:
                 print("  ✗ 本轮无有效识别结果，换一张重试")
@@ -511,61 +495,6 @@ def sign_in(client: httpx.Client) -> bool:
         # API 直接返回成功消息字符串
         return True
     return sign_result.get("status") == "success" or sign_result.get("code") == 0
-
-
-# ── CapMonster 打码（GeeTest v3，九宫格点选）──────────────────
-
-def solve_geetest_capmonster(
-    gt: str,
-    challenge: str,
-    website_url: str = "https://www.natfrp.com/user/",
-    api_subdomain: str = "",
-) -> tuple:
-    """用 CapMonster 云打码解 GeeTest v3，返回 (challenge, validate, seccode)"""
-    if not CAPMONSTER_KEY:
-        raise RuntimeError("未配置 CAPMONSTER_KEY")
-    task = {
-        "type": "GeeTestTask",
-        "websiteURL": website_url,
-        "gt": gt,
-        "challenge": challenge,
-        "version": 3,
-        "userAgent": COMMON_HEADERS["user-agent"],
-    }
-    if api_subdomain:
-        task["geetestApiServerSubdomain"] = api_subdomain
-    print(f"  CapMonster 任务: gt={gt[:12]}... challenge={challenge[:12]}... "
-          f"api_subdomain={api_subdomain or '(默认)'}")
-
-    with httpx.Client(timeout=45) as c:
-        r = c.post(
-            f"{CAPMONSTER_API}/createTask",
-            json={"clientKey": CAPMONSTER_KEY, "task": task},
-        )
-        j = r.json()
-        if j.get("errorId"):
-            raise RuntimeError(f"CapMonster createTask 失败: {j}")
-        task_id = j["taskId"]
-        print(f"  CapMonster taskId={task_id}，等待结果 ...")
-
-        for _ in range(50):  # 最长约 150 秒
-            time.sleep(3)
-            r = c.post(
-                f"{CAPMONSTER_API}/getTaskResult",
-                json={"clientKey": CAPMONSTER_KEY, "taskId": task_id},
-            )
-            j = r.json()
-            if j.get("errorId"):
-                raise RuntimeError(f"CapMonster getTaskResult 失败: {j}")
-            if j.get("status") == "ready":
-                sol = j.get("solution") or {}
-                # v3 返回三项：challenge / validate / seccode
-                ch = sol.get("challenge") or sol.get("geetest_challenge") or challenge
-                validate = sol.get("validate") or sol.get("geetest_validate")
-                seccode = sol.get("seccode") or sol.get("geetest_seccode") or ""
-                print(f"  ✓ CapMonster 已求解: {str(validate)[:16]}... seccode={str(seccode)[:16]}...")
-                return ch, validate, seccode
-    raise RuntimeError("CapMonster 求解超时")
 
 
 # ── 验证码识别（多模态视觉模型）──────────────────────────────
