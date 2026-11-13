@@ -36,6 +36,7 @@ CAPTCHA_API_BASE = (
 )
 CAPTCHA_API_KEY = os.getenv("VISION_API_KEY") or os.getenv("CAPTCHA_API_KEY", "")
 CAPTCHA_MODEL = os.getenv("VISION_MODEL") or os.getenv("CAPTCHA_MODEL", "gpt-4o")
+VISION_MODEL_FALLBACK = os.getenv("VISION_MODEL_FALLBACK", "")
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "10"))
 
@@ -515,10 +516,10 @@ NINE_PROMPT = (
 )
 
 
-def _vision_chat(data_url: str, prompt: str, max_tokens: int = 400) -> str:
+def _vision_chat(data_url: str, prompt: str, max_tokens: int = 1200, model: str = "") -> str:
     """直接 POST 到 OpenAI 兼容端点（支持自签名证书），返回文本内容"""
     payload = {
-        "model": CAPTCHA_MODEL,
+        "model": model or CAPTCHA_MODEL,
         "messages": [{
             "role": "user",
             "content": [
@@ -534,7 +535,7 @@ def _vision_chat(data_url: str, prompt: str, max_tokens: int = 400) -> str:
         json=payload,
         headers={"Authorization": f"Bearer {CAPTCHA_API_KEY}",
                  "Content-Type": "application/json"},
-        timeout=120,
+        timeout=180,
         verify=False,
     )
     if resp.status_code != 200:
@@ -544,8 +545,14 @@ def _vision_chat(data_url: str, prompt: str, max_tokens: int = 400) -> str:
     choices = data.get("choices") or []
     if not choices:
         return ""
-    message = choices[0].get("message") or {}
+    choice = choices[0]
+    message = choice.get("message") or {}
     content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    # 空内容通常是推理模型把 token 预算耗在思考上（finish_reason=length）
+    print(f"  ✗ 视觉模型空响应（finish_reason={choice.get('finish_reason')}, "
+          f"usage={json.dumps(data.get('usage'), ensure_ascii=False)[:120]}）")
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
@@ -607,17 +614,31 @@ def _parse_nine_cells(text: str) -> list:
 
 
 def _vision_nine_grid(img_bytes: bytes) -> list:
-    """用多模态模型识别九宫格，返回 ["列_行", ...]"""
+    """用多模态模型识别九宫格，返回 ["列_行", ...]；空响应自动重试，可配备用模型"""
     if not CAPTCHA_API_KEY:
         return []
     import base64 as _b64
     data_url = "data:image/png;base64," + _b64.b64encode(img_bytes).decode()
-    text = _vision_chat(data_url, NINE_PROMPT)
-    if not text:
-        print("  ✗ 视觉模型未返回内容")
-        return []
-    print(f"  视觉模型输出: {text[:300]}")
-    return _parse_nine_cells(text)
+
+    models = [CAPTCHA_MODEL]
+    if VISION_MODEL_FALLBACK and VISION_MODEL_FALLBACK != CAPTCHA_MODEL:
+        models.append(VISION_MODEL_FALLBACK)
+
+    for model in models:
+        for attempt in range(1, 3):
+            text = _vision_chat(data_url, NINE_PROMPT, model=model)
+            if not text:
+                if attempt < 2:
+                    print(f"  {model} 第 {attempt} 次空响应，重试 ...")
+                    time.sleep(1)
+                continue
+            print(f"  视觉模型输出({model}): {text[:300]}")
+            points = _parse_nine_cells(text)
+            if points:
+                return points
+            break
+    print("  ✗ 视觉模型未返回有效识别结果")
+    return []
 
 
 def _recognize_captcha(image_url: str, pic_type: str) -> list:
