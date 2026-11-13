@@ -574,13 +574,15 @@ def _parse_nine_cells(text: str) -> list:
     raw_cells = []
     obj = None
 
-    # 优先解析 JSON 对象
-    m = _re.search(r'\{.*\}', text, _re.DOTALL)
-    if m:
+    # 优先解析 JSON：从末尾往前找，Claude 会把 JSON 放在解释之后
+    for cand in reversed(_re.findall(r'\{[^{}]*\}', text)):
         try:
-            obj = json.loads(m.group())
+            parsed = json.loads(cand)
         except (json.JSONDecodeError, ValueError):
-            obj = None
+            continue
+        if isinstance(parsed, dict) and ("cells" in parsed or "points" in parsed):
+            obj = parsed
+            break
     if isinstance(obj, dict):
         raw_cells = obj.get("cells") or obj.get("points") or []
     elif isinstance(obj, list):
