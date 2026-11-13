@@ -16,7 +16,10 @@
 - `NATFRP_USERNAME`：natfrp 用户名
 - `NATFRP_PASSWORD`：natfrp 密码
 - `VISION_API_BASE` / `VISION_API_KEY` / `VISION_MODEL`：OpenAI 兼容的多模态模型端点
-  （签到遇到九宫格时调用；例如 `https://xxx/v1` + `sk-...` + `deepseek-v4.1-flash`）。
+  （签到遇到九宫格时调用；例如 `https://xxx/v1` + `sk-...` + `claude-sonnet-4-6`）。
+  实测推理型模型（deepseek 系）会出现「推理 token 吃满预算、content 为空」，因此：
+  - `VISION_MODEL` 建议用非推理模型（claude-sonnet-4-6 / gemini-3.8-flash）；
+  - 可选 `VISION_MODEL_FALLBACK` 配备用模型，空响应会自动重试并切换。
   **不配置也不会中断**：会退回本地 MobileNet 兜底识图，或换一张图重试。
 
 > natfrp 的 GeeTest 走的是协议握手（AES/RSA 加密的 `w` 参数 + 鼠标轨迹 + 指纹字段）。
@@ -37,6 +40,8 @@
 - 定时：每天北京时间 `09:07` / `13:31` / `20:53` 三个非整点窗口（降低 GitHub 调度丢单），
   每次触发前随机等待 1~6 分钟。
 - 手动：Actions → FRP Auto Sign-in → Run workflow。
+- 自检：Run workflow 时勾选 `selftest`，只跑 3 轮九宫格识别验证（**不消耗当天签到**），
+  失败样本会作为 `captcha-samples` artifact 上传（保留 7 天）。
 - 已签到时会输出「今日已签到 / 今天已经签到过了」并正常结束。
 
 ## 三、接口说明（88frp）
