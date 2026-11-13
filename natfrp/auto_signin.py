@@ -508,32 +508,29 @@ def sign_in(client: httpx.Client) -> bool:
 # ── 验证码识别（多模态视觉模型）──────────────────────────────
 
 NINE_PROMPT = (
-    "这是极验(GeeTest)的九宫格点选验证码。\n"
-    "图片最下方、左侧那个独立的小图案是【参考图标】，代表要找的目标物品（线条简笔画）。\n"
+    "这是极验(GeeTest)的九宫格点选验证码，一共两张图：\n"
+    "第 1 张是完整验证码；第 2 张是底部那个【参考图标】的放大图（放大 3 倍，以它为准识别目标物品）。\n"
     "图片上方是 3 行 × 3 列的格子，每个格子里是一张物品的真实照片。\n"
     "任务：找出所有与参考图标属于同一种物品的格子。\n"
     "要点：\n"
-    "1. 参考图标是简笔画，格子里的物品是真实照片，形状、角度、颜色、背景都可能不同；\n"
-    "2. 只按「物品类别」判断，例如参考图标是鹿的简笔画，那么所有鹿的照片都算匹配；\n"
-    "3. 不要选长相不同类但风格相似的格子，也不要把参考图标本身当成格子；\n"
-    "4. 匹配的格子可能有 1 到 5 个，必须全部找出。\n"
+    "1. 先仔细看清第 2 张放大图里到底是什么物品（不要被第 1 张里的大面积物体带偏）；\n"
+    "2. 参考图标是线条简笔画，格子里的物品是真实照片，形状、角度、颜色、背景都可能不同；\n"
+    "3. 只按「物品类别」判断，同一类物品的不同款式都算匹配；\n"
+    "4. 不要选长得像但不同类的格子，也不要把参考图标本身当成格子；\n"
+    "5. 匹配的格子可能有 1 到 5 个，必须全部找出。\n"
     "行号：从上到下为 1、2、3。列号：从左到右为 1、2、3。\n"
     "只输出JSON，不要任何解释，格式："
     '{"object":"目标物品名称","cells":[[行,列],[行,列]]}'
 )
 
 
-def _vision_chat(data_url: str, prompt: str, max_tokens: int = 1200, model: str = "") -> str:
-    """直接 POST 到 OpenAI 兼容端点（支持自签名证书），返回文本内容"""
+def _vision_chat(images: list, prompt: str, max_tokens: int = 1200, model: str = "") -> str:
+    """直接 POST 到 OpenAI 兼容端点（支持自签名证书），images 为 data URL 列表"""
+    content = [{"type": "text", "text": prompt}]
+    content += [{"type": "image_url", "image_url": {"url": url}} for url in images]
     payload = {
         "model": model or CAPTCHA_MODEL,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        }],
+        "messages": [{"role": "user", "content": content}],
         "max_tokens": max_tokens,
         "stream": False,
     }
@@ -620,12 +617,33 @@ def _parse_nine_cells(text: str) -> list:
     return points
 
 
+def _icon_zoom_png(img_bytes: bytes, scale: int = 3) -> bytes:
+    """裁出底部参考图标并放大，避免模型被九宫格里的大面积物体带偏"""
+    from io import BytesIO
+
+    from PIL import Image
+
+    im = Image.open(BytesIO(img_bytes)).convert("RGB")
+    w, h = im.size
+    grid_h = int(h * 0.83)
+    icon = im.crop((0, grid_h, w // 3, h))
+    icon = icon.resize((icon.width * scale, icon.height * scale), Image.LANCZOS)
+    out = BytesIO()
+    icon.save(out, format="PNG")
+    return out.getvalue()
+
+
 def _vision_nine_grid(img_bytes: bytes) -> list:
     """用多模态模型识别九宫格，返回 ["列_行", ...]；空响应自动重试，可配备用模型"""
     if not CAPTCHA_API_KEY:
         return []
     import base64 as _b64
-    data_url = "data:image/png;base64," + _b64.b64encode(img_bytes).decode()
+    images = ["data:image/png;base64," + _b64.b64encode(img_bytes).decode()]
+    try:
+        zoom = _icon_zoom_png(img_bytes)
+        images.append("data:image/png;base64," + _b64.b64encode(zoom).decode())
+    except Exception as exc:  # 放大失败不影响识别，退回单图
+        print(f"  ! 参考图标放大失败（改用单图识别）: {exc}")
 
     models = [CAPTCHA_MODEL]
     if VISION_MODEL_FALLBACK and VISION_MODEL_FALLBACK != CAPTCHA_MODEL:
@@ -633,7 +651,7 @@ def _vision_nine_grid(img_bytes: bytes) -> list:
 
     for model in models:
         for attempt in range(1, 3):
-            text = _vision_chat(data_url, NINE_PROMPT, model=model)
+            text = _vision_chat(images, NINE_PROMPT, model=model)
             if not text:
                 if attempt < 2:
                     print(f"  {model} 第 {attempt} 次空响应，重试 ...")
@@ -677,7 +695,7 @@ def _recognize_captcha(image_url: str, pic_type: str) -> list:
             '[{"x": 100, "y": 200}, ...]。坐标原点在左上角。'
             '只输出JSON，不要其他文字。'
         )
-        result_text = _strip_json_fence(_vision_chat(data_url, prompt))
+        result_text = _strip_json_fence(_vision_chat([data_url], prompt))
         if not result_text:
             print("  ✗ AI 未返回内容")
             return []
