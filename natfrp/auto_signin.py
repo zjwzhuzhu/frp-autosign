@@ -462,6 +462,13 @@ def sign_in(client: httpx.Client) -> bool:
                 validate = verify_result["data"]["validate"]
                 print(f"  ✓ 验证码通过（{used}）")
                 break
+            # 失败时把图片落盘，CI 里作为 artifact 上传便于复盘
+            try:
+                fail_dir = Path(__file__).parent.parent / "captcha_probe"
+                fail_dir.mkdir(exist_ok=True)
+                (fail_dir / f"fail_sign_{int(time.time())}.png").write_bytes(img_bytes)
+            except OSError:
+                pass
 
         crack.close()
         crack = None
@@ -632,7 +639,7 @@ def _vision_nine_grid(img_bytes: bytes) -> list:
                     print(f"  {model} 第 {attempt} 次空响应，重试 ...")
                     time.sleep(1)
                 continue
-            print(f"  视觉模型输出({model}): {text[:300]}")
+            print(f"  视觉模型输出({model}): {text[:800]}")
             points = _parse_nine_cells(text)
             if points:
                 return points
