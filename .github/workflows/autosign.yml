@@ -82,3 +82,12 @@ jobs:
           VISION_MODEL: ${{ secrets.VISION_MODEL }}
           VISION_MODEL_FALLBACK: ${{ secrets.VISION_MODEL_FALLBACK }}
         run: python probe_click_accuracy.py 3
+
+      - name: 上传验证码样本（便于复盘）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: captcha-samples
+          path: captcha_probe/*.png
+          if-no-files-found: ignore
+          retention-days: 7
